@@ -10,6 +10,13 @@ import (
 	"sync"
 )
 
+type Shortener interface {
+	createShortenedUrl(string) (string, error)
+	loadFromUrlMap(string) (any, bool)
+	loadFromInvertedUrlMap(string) (any, bool)
+	isValidHostname(string) bool
+}
+
 type UrlShortener struct {
 	urlMap         sync.Map
 	invertedUrlMap sync.Map
@@ -17,43 +24,16 @@ type UrlShortener struct {
 	len            int
 }
 
-func shortenUrl(w http.ResponseWriter, r *http.Request, urlShortener *UrlShortener) {
-	w.Header().Set("Content-Type", "application/json")
-	var data map[string]string
-	err := json.NewDecoder(r.Body).Decode(&data)
-	if err != nil {
-		http.Error(w, "error reading http request body", http.StatusBadRequest)
-		return
-	}
-	originalUrl, ok := data["url"]
-	if !ok {
-		http.Error(w, "http request body doesn't contain url param", http.StatusBadRequest)
-		return
-	}
-	_, err = url.Parse(originalUrl)
-	if err != nil {
-		http.Error(w, "invalid url passed in request", http.StatusBadRequest)
-		return
-	}
-	shortenedUrl, ok := urlShortener.urlMap.Load(originalUrl)
-	if ok {
-		u, ok := shortenedUrl.(string)
-		if !ok {
-			http.Error(w, "invalid shortened url found", http.StatusInternalServerError)
-			return
-		}
-		response := map[string]string{"shortenedUrl": u}
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(&response)
-		return
-	}
-	u, err := urlShortener.createShortenedUrl(originalUrl)
-	if err != nil {
-		http.Error(w, "error generating shortened url", http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]string{"shortenedUrl": u})
+func (u *UrlShortener) loadFromUrlMap(originalUrl string) (any, bool) {
+	return u.urlMap.Load(originalUrl)
+}
+
+func (u *UrlShortener) loadFromInvertedUrlMap(shortenedUrl string) (any, bool) {
+	return u.invertedUrlMap.Load(shortenedUrl)
+}
+
+func (u *UrlShortener) isValidHostname(host string) bool {
+	return u.hostname != host
 }
 
 func (u *UrlShortener) createShortenedUrl(originalUrl string) (string, error) {
@@ -84,7 +64,46 @@ func (u *UrlShortener) generateRandomStr() (string, error) {
 	return string(randonStr), nil
 }
 
-func getShortenedUrl(w http.ResponseWriter, r *http.Request, urlShortener *UrlShortener) {
+func getShortenedUrl(w http.ResponseWriter, r *http.Request, urlShortener Shortener) {
+	w.Header().Set("Content-Type", "application/json")
+	var data map[string]string
+	err := json.NewDecoder(r.Body).Decode(&data)
+	if err != nil {
+		http.Error(w, "error reading http request body", http.StatusBadRequest)
+		return
+	}
+	originalUrl, ok := data["url"]
+	if !ok {
+		http.Error(w, "http request body doesn't contain url param", http.StatusBadRequest)
+		return
+	}
+	_, err = url.Parse(originalUrl)
+	if err != nil {
+		http.Error(w, "invalid url passed in request", http.StatusBadRequest)
+		return
+	}
+	shortenedUrl, ok := urlShortener.loadFromUrlMap(originalUrl)
+	if ok {
+		u, ok := shortenedUrl.(string)
+		if !ok {
+			http.Error(w, "invalid shortened url found", http.StatusInternalServerError)
+			return
+		}
+		response := map[string]string{"shortenedUrl": u}
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(&response)
+		return
+	}
+	u, err := urlShortener.createShortenedUrl(originalUrl)
+	if err != nil {
+		http.Error(w, "error generating shortened url", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{"shortenedUrl": u})
+}
+
+func getOriginalUrl(w http.ResponseWriter, r *http.Request, urlShortener Shortener) {
 	w.Header().Set("Content-Type", "application/json")
 	query := r.URL.Query()
 	shortenedUrl := query.Get("shortenedUrl")
@@ -97,11 +116,11 @@ func getShortenedUrl(w http.ResponseWriter, r *http.Request, urlShortener *UrlSh
 		http.Error(w, "invalid url passed in request", http.StatusBadRequest)
 		return
 	}
-	if parsedUrl.Host != urlShortener.hostname {
+	if !urlShortener.isValidHostname(parsedUrl.Host) {
 		http.Error(w, "invalid shortened url host passed in request", http.StatusBadRequest)
 		return
 	}
-	originalUrl, ok := urlShortener.invertedUrlMap.Load(shortenedUrl)
+	originalUrl, ok := urlShortener.loadFromInvertedUrlMap(shortenedUrl)
 	if !ok {
 		http.Error(w, "invalid shortened url host passed in request", http.StatusBadRequest)
 		return
@@ -109,6 +128,8 @@ func getShortenedUrl(w http.ResponseWriter, r *http.Request, urlShortener *UrlSh
 	originalUrlStr, ok := originalUrl.(string)
 	if !ok {
 		http.Error(w, "invalid original url found", http.StatusInternalServerError)
+		//w.WriteHeader(http.StatusInternalServerError)
+		//w.Write([]byte("invalid original url found"))
 		return
 	}
 	w.WriteHeader(http.StatusOK)
@@ -120,13 +141,16 @@ func main() {
 	http.HandleFunc("/shortenurl", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			getShortenedUrl(w, r, &urlShortener)
+			getOriginalUrl(w, r, &urlShortener)
 
 		case http.MethodPost:
-			shortenUrl(w, r, &urlShortener)
+			getShortenedUrl(w, r, &urlShortener)
 
 		default:
-			http.Error(w, "Invalid http operation"+r.Method, http.StatusBadRequest)
+			//w.WriteHeader(http.StatusMethodNotAllowed)
+			//w.Write([]byte("method not allowed"))
+			//return
+			http.Error(w, "Invalid http operation"+r.Method, http.StatusMethodNotAllowed)
 		}
 	})
 
